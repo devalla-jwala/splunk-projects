@@ -1,449 +1,183 @@
-# splunk-projects
-# Analyzing DHCP Log Files Using Splunk SIEM
+# MITRE ATT&CK Mapping & Threat Detection — Splunk Log Analysis Project
+
+[#mitre-attack-mapping-threat-detection](#mitre-attack-mapping-threat-detection)
 
 ## Introduction
-DHCP (Dynamic Host Configuration Protocol) log files contain valuable information about IP address assignments, lease durations, client requests, and server responses. Analyzing DHCP logs using Splunk SIEM enables network administrators to monitor IP address usage, detect anomalies, and troubleshoot network issues effectively.
 
-## Project Overview
-In this project, we will upload sample DHCP log files to Splunk SIEM and perform various analyses to gain insights into IP address assignment within the network.
+[#introduction](#introduction)
 
-## Prerequisites
-Before starting the project, ensure the following:
-- Splunk instance is installed and configured.
-- DHCP log data sources are configured to forward logs to Splunk.
+This document extends the DHCP, DNS, SMTP, SSH, and Tunnel log analysis projects by mapping detected behaviors to [MITRE ATT&CK](https://attack.mitre.org/) techniques and adding SPL queries specifically aimed at brute-force detection and anomaly identification. The goal is to move from "what does this log show" to "what adversary technique does this log help detect."
 
-## Steps to Upload Sample DHCP Log Files to Splunk SIEM
+## MITRE ATT&CK Technique Mapping
 
-### 1. Prepare Sample DHCP Log Files
-- Obtain sample [DHCP log files](https://www.secrepo.com/maccdc2012/dhcp.log.gz) in a suitable format.
-- Ensure the log files contain relevant DHCP events, including timestamps, IP address assignments, lease durations, client identifiers, etc.
-- Save the sample log files in a directory accessible by the Splunk instance.
+[#mitre-attack-technique-mapping](#mitre-attack-technique-mapping)
 
-### 2. Upload Log Files to Splunk
-- Log in to the Splunk web interface.
-- Navigate to **Settings** > **Add Data**.
-- Select **Upload** as the data input method.
+| Log Source | Technique ID | Technique Name | Tactic | Why it maps |
+|---|---|---|---|---|
+| SSH | T1110 / T1110.001 | Brute Force / Password Guessing | Credential Access | Repeated failed logins from one or few source IPs against one or more accounts |
+| SSH | T1078 | Valid Accounts | Defense Evasion, Persistence | Successful login following a string of failures (credential compromise) |
+| SMTP | T1110.003 | Password Spraying | Credential Access | Many accounts, each tried with few attempts, from the same source — avoids lockouts |
+| SMTP | T1566 | Phishing | Initial Access | Anomalous sender domains, spoofed addresses, suspicious attachment types/sizes |
+| SMTP | T1071.003 | Application Layer Protocol: Mail Protocols | Command and Control | Mail protocol used for C2 or data exfiltration |
+| DNS | T1071.004 | Application Layer Protocol: DNS | Command and Control | High-volume or high-entropy DNS queries indicating tunneling/beaconing |
+| DNS | T1568.002 | Dynamic Resolution: DGA | Command and Control | Spikes in NXDOMAIN responses suggesting domain generation algorithms |
+| DNS | T1590 | Gather Victim Network Information | Reconnaissance | Repeated lookups against internal naming patterns |
+| DHCP | T1590.005 | IP Addresses | Reconnaissance | Unusual or unauthorized client identifiers requesting leases |
+| DHCP | T1557 | Adversary-in-the-Middle | Credential Access, Collection | Rogue DHCP server behavior (unexpected lease offers) |
+| Tunnel (Zeek/GRE) | T1572 | Protocol Tunneling | Command and Control | GRE/IP-in-IP tunnels used to wrap and conceal C2 traffic |
+| Tunnel (Zeek/GRE) | T1071 | Application Layer Protocol | Command and Control | Tunneled traffic riding over allowed protocols to bypass filtering |
 
-### 3. Choose File
-- Click on **Select File** and choose the sample DHCP log file you prepared earlier.
+## Brute Force & Anomaly Detection — SPL Queries
 
-### 4. Set Source Type
-- In the **Set Source Type** section, specify the source type for the uploaded log file.
-- Choose the appropriate source type for DHCP logs (e.g., `dhcpd` or a custom source type if applicable).
+[#brute-force-anomaly-detection-spl-queries](#brute-force-anomaly-detection-spl-queries)
 
-### 5. Review Settings
-- Review other settings such as index, host, and sourcetype.
-- Ensure the settings are configured correctly to match the sample DHCP log file.
+These queries supplement the existing per-log SPL searches and are written to directly surface brute-force attempts and outlier behavior, each tagged with its mapped technique.
 
-### 6. Click Upload
-- Once all settings are configured, click on the **Review** button.
-- Review the settings one final time to ensure accuracy.
-- Click **Submit** to upload the sample DHCP log file to Splunk.
+### SSH — T1110 Brute Force
 
-### 7. Verify Upload
-- After uploading, navigate to the search bar in the Splunk interface.
-- Run a search query to verify that the uploaded DHCP events are visible.
+[#ssh-t1110-brute-force](#ssh-t1110-brute-force)
 
-## Steps to Analyze DHCP Log Files in Splunk SIEM
-
-
-### 1. 1. Search for DHCP Events
-- Open Splunk interface and navigate to the search bar.
-- Enter the following search query to retrieve DHCP events:
+**1. Failed login threshold per source IP**
 ```
-index=<your_dhcp_index> sourcetype=<your_dhcp_sourcetype>
+index=<your_ssh_index> sourcetype=<your_ssh_sourcetype> action="failed"
+| stats count by src_ip, user
+| where count > 5
 ```
 
-### 2. Extract Relevant Fields
-- Identify key fields in DHCP logs such as timestamps, IP addresses, lease durations, client identifiers, etc.
-- Use Splunk's field extraction capabilities or regular expressions to extract these fields for better analysis.
-- Example extraction command
+**2. Brute force against multiple accounts from one source (password spraying variant)**
 ```
-| rex field=_raw "<regex_pattern>"
-
+index=<your_ssh_index> sourcetype=<your_ssh_sourcetype> action="failed"
+| stats dc(user) as unique_users, count by src_ip
+| where unique_users > 3 AND count > 10
 ```
 
-### 3. Analyze Email Traffic Patterns
-- Determine the distribution of IP address assignments:
+**3. Failed-then-success pattern (possible compromised credential)**
 ```
-index=<your_dhcp_index> sourcetype=<your_dhcp_sourcetype>
-| stats count by leased_ip
-```
-- Identify top IP addresses leased by the DHCP server:
-```
-index=<your_dhcp_index> sourcetype=<your_dhcp_sourcetype>
-| top limit=10 leased_ip
+index=<your_ssh_index> sourcetype=<your_ssh_sourcetype>
+| transaction user maxspan=10m
+| search action="failed" action="success"
+| table _time user src_ip action
 ```
 
-### 4. Detect Anomalies
-- Look for unusual patterns in IP address assignments:
+**4. Brute force velocity over time (rate of failed attempts)**
 ```
-index=<your_dhcp_index> sourcetype=<your_dhcp_sourcetype>
-| timechart span=1h count by _time
-```
-
-- Analyze DHCP requests from unauthorized or unknown clients:
-```
-index=<your_dhcp_index> sourcetype=<your_dhcp_sourcetype>
-| search NOT client_identifier="authorized_identifier"
+index=<your_ssh_index> sourcetype=<your_ssh_sourcetype> action="failed"
+| bin _time span=5m
+| stats count by _time, src_ip
+| where count > 10
 ```
 
-### 5. Monitor IP Address Usage
-- Monitor IP address usage over time:
+### SMTP — T1110.003 Password Spraying / T1566 Phishing
+
+[#smtp-t1110003-password-spraying-t1566-phishing](#smtp-t1110003-password-spraying-t1566-phishing)
+
+**5. Low-and-slow auth failures across many mailboxes (spray pattern)**
 ```
-index=<your_dhcp_index> sourcetype=<your_dhcp_sourcetype>
-| timechart span=1h count by leased_ip
-```
-- Identify IP addresses with multiple lease renewals or changes:
-```
-index=<your_dhcp_index> sourcetype=<your_dhcp_sourcetype>
-| stats count by leased_ip, lease_renewal
-| where count > 1 AND lease_renewal="true"
-```
-- Analyze DHCP traffic patterns and deviations from normal behavior:
-```
-index=<your_dhcp_index> sourcetype=<your_dhcp_sourcetype>
-| timechart span=1d count by leased_ip
+index=<your_smtp_index> sourcetype=<your_smtp_sourcetype> status="failed"
+| stats dc(recipient_address) as targeted_accounts, count by src_ip
+| where targeted_accounts > 5
 ```
 
+**6. Spike in failed SMTP auth in short window**
+```
+index=<your_smtp_index> sourcetype=<your_smtp_sourcetype> status="failed"
+| timechart span=15m count by src_ip
+```
 
+**7. Suspicious sender domain / spoofing indicators**
+```
+index=<your_smtp_index> sourcetype=<your_smtp_sourcetype>
+| rex field=sender_address "@(?<sender_domain>.+)"
+| stats count by sender_domain
+| sort -count
+```
 
-## Conclusion
-Analyzing DHCP log files using Splunk SIEM provides valuable insights into IP address assignment within a network. By monitoring DHCP events, detecting anomalies, and correlating with other logs, organizations can enhance their network management capabilities, troubleshoot issues, and improve overall network security.
+### DNS — T1071.004 C2 over DNS / T1568.002 DGA
 
-Feel free to customize these steps according to your specific use case and requirements. Happy analyzing!
+[#dns-t1071004-c2-over-dns-t1568002-dga](#dns-t1071004-c2-over-dns-t1568002-dga)
 
-Feel free to customize these steps according to your specific use case and requirements. 
-# Analyzing DNS Log Files Using Splunk SIEM
-
-## Introduction
-DNS (Domain Name System) logs are crucial for understanding network activity and identifying potential security threats. Splunk SIEM (Security Information and Event Management) provides powerful capabilities for analyzing DNS logs and detecting anomalies or malicious activities.
-
-## Prerequisites
-Before analyzing DNS logs in Splunk, ensure the following:
-- Splunk instance is installed and configured.
-- DNS log data sources are configured to forward logs to Splunk.
-
-## Steps to Upload Sample DNS Log Files to Splunk SIEM
-
-### 1. Prepare Sample DNS Log Files
-- Obtain sample [DNS log file](https://www.secrepo.com/maccdc2012/dns.log.gz) in a suitable format (e.g., text files).
-- Ensure the log files contain relevant DNS events, including source IP, destination IP, domain name, query type, response code, etc.
-- Save the sample log files in a directory accessible by the Splunk instance.
-
-### 2. Upload Log Files to Splunk
-- Log in to the Splunk web interface.
-- Navigate to **Settings** > **Add Data**.
-- Select **Upload** as the data input method.
-
-### 3. Choose File
-- Click on **Select File** and choose the sample DNS log file you prepared earlier.
-
-### 4. Set Source Type
-- In the **Set Source Type** section, specify the source type for the uploaded log file.
-- Choose the appropriate source type for DNS logs (e.g., `dns` or a custom source type if applicable).
-
-### 5. Review Settings
-- Review other settings such as index, host, and sourcetype.
-- Ensure the settings are configured correctly to match the sample DNS log file.
-
-### 6. Click Upload
-- Once all settings are configured, click on the **Review** button.
-- Review the settings one final time to ensure accuracy.
-- Click **Submit** to upload the sample DNS log file to Splunk.
-
-### 7. Verify Upload
-- After uploading, navigate to the search bar in the Splunk interface.
-- Run a search query to verify that the uploaded DNS events are visible.
-  
-  ```spl
-  index=<your_dns_index> sourcetype=<your_dns_sourcetype>
-
-
-## Steps to Analyze DNS Log Files in Splunk SIEM
-
-### 1. Search for DNS Events   
-- Open Splunk interface and navigate to the search bar.   
-- Enter the following search query to retrieve DNS events   
+**8. High query volume per host (possible tunneling/beaconing)**
 ```
 index=* sourcetype=dns_sample
+| stats count by src_ip
+| sort -count
+| where count > 1000
 ```
 
-### 2. Extract Relevant Fields
-- Identify key fields in DNS logs such as source IP, destination IP, domain name, query type, response code, etc.   
-- As mentioned below,  | regex _raw="(?i)\b(dns|domain|query|response|port 53)\b": This regex searches for common DNS-related keywords in the raw event data.
-- Example extraction command:
+**9. NXDOMAIN spike (possible DGA activity)**
 ```
-index=* sourcetype=dns_sample | regex _raw="(?i)\b(dns|domain|query|response|port 53)\b"
+index=* sourcetype=dns_sample rcode="NXDOMAIN"
+| timechart span=1h count by src_ip
 ```
 
-### 3. Identify Anomalies
-- Look for unusual patterns or anomalies in DNS activity.
-- Example query to identify spikes
+**10. High-entropy / long subdomain queries (tunneling indicator)**
 ```
-index=_* OR index=* sourcetype=dns_sample  | stats count by fqdn
-```
-
-### 4. Find the top DNS sources
-- Use the top command to count the occurrences of each query type:   
-```
-index=* sourcetype=dns_sample | top fqdn, src_ip
+index=* sourcetype=dns_sample
+| eval qlen=len(fqdn)
+| where qlen > 50
+| stats count by fqdn, src_ip
 ```
 
-
-
-### 5. Investigate Suspicious Domains
-- Search for domains associated with known malicious activity or suspicious behavior.
-- Utilize threat intelligence feeds or reputation databases to identify malicious domains such virustotal.com
-- Example search for known malicious domains:
+**11. Rare or first-seen domains in the environment**
 ```
-index=* sourcetype=dns_sample fqdn="maliciousdomain.com"
+index=* sourcetype=dns_sample
+| stats earliest(_time) as first_seen by fqdn
+| where first_seen > relative_time(now(), "-1d")
 ```
 
-## Conclusion
-Analyzing DNS log files using Splunk SIEM enables security professionals to detect and respond to potential security incidents effectively. By understanding DNS activity and identifying anomalies, organizations can enhance their overall security posture and protect against various cyber threats.
-# Analyzing SMTP Log Files Using Splunk SIEM
+### DHCP — T1590.005 Reconnaissance / T1557 AiTM
 
-## Introduction
-SMTP (Simple Mail Transfer Protocol) log files contain valuable information about email communication, including sender and recipient addresses, timestamps, email subjects, and more. Analyzing SMTP logs using Splunk SIEM enables security professionals to monitor email traffic, detect anomalies, and identify potential security threats.
+[#dhcp-t1590005-reconnaissance-t1557-aitm](#dhcp-t1590005-reconnaissance-t1557-aitm)
 
-## Project Overview
-In this project, we will upload sample SMTP log files to Splunk SIEM and perform various analyses to gain insights into email communication within the network.
-
-## Prerequisites
-Before starting the project, ensure the following:
-- Splunk instance is installed and configured.
-- SMTP log data sources are configured to forward logs to Splunk.
-
-## Steps to Upload Sample SMTP Log Files to Splunk SIEM
-
-### 1. Prepare Sample SMTP Log Files
-- Obtain sample [SMTP log file](https://www.secrepo.com/maccdc2012/smtp.log.gz) in a suitable format (e.g., text files).
-- Ensure the log files contain relevant SMTP events, including timestamps, sender and recipient addresses, email subjects, etc.
-- Save the sample log files in a directory accessible by the Splunk instance.
-
-### 2. Upload Log Files to Splunk
-- Log in to the Splunk web interface.
-- Navigate to **Settings** > **Add Data**.
-- Select **Upload** as the data input method.
-
-### 3. Choose File
-- Click on **Select File** and choose the sample SMTP log file you prepared earlier.
-
-### 4. Set Source Type
-- In the **Set Source Type** section, specify the source type for the uploaded log file.
-- Choose the appropriate source type for SMTP logs (e.g., `mail` or a custom source type if applicable).
-
-### 5. Review Settings
-- Review other settings such as index, host, and sourcetype.
-- Ensure the settings are configured correctly to match the sample SMTP log file.
-
-### 6. Click Upload
-- Once all settings are configured, click on the **Review** button.
-- Review the settings one final time to ensure accuracy.
-- Click **Submit** to upload the sample SMTP log file to Splunk.
-
-### 7. Verify Upload
-- After uploading, navigate to the search bar in the Splunk interface.
-- Run a search query to verify that the uploaded SMTP events are visible.
-
-## Steps to Analyze SMTP Log Files in Splunk SIEM
-
-
-### 1. Search for SMTP Events
-- Open Splunk interface and navigate to the search bar.
-- Enter the following search query to retrieve SMTP events
+**12. Unauthorized/unknown client identifiers requesting leases**
 ```
-index=<your_smtp_index> sourcetype=<your_smtp_sourcetype>
+index=<your_dhcp_index> sourcetype=<your_dhcp_sourcetype>
+| search NOT client_identifier IN ("authorized_identifier_1","authorized_identifier_2")
+| stats count by client_identifier, leased_ip
 ```
 
-### 2. Extract Relevant Fields
-- Identify key fields in SMTP logs such as timestamps, sender and recipient addresses, email subjects, etc.
-- Use Splunk's field extraction capabilities or regular expressions to extract these fields for better analysis.
-- Example extraction command
+**13. Multiple DHCP servers responding (rogue server indicator)**
 ```
-| rex field=_raw "<regex_pattern>"
-
+index=<your_dhcp_index> sourcetype=<your_dhcp_sourcetype> event_type="offer"
+| stats dc(server_ip) as offering_servers by leased_ip
+| where offering_servers > 1
 ```
 
-### 3. Analyze Email Traffic Patterns
-- Determine the distribution of email senders:
+### Tunnel (Zeek) — T1572 Protocol Tunneling
+
+[#tunnel-zeek-t1572-protocol-tunneling](#tunnel-zeek-t1572-protocol-tunneling)
+
+**14. GRE tunnel volume anomaly by source/destination pair**
 ```
-index=<your_smtp_index> sourcetype=<your_smtp_sourcetype>
-| top limit=10 sender_address
-```
-- Identify top recipient addresses:
-```
-index=<your_smtp_index> sourcetype=<your_smtp_sourcetype>
-| top limit=10 recipient_address
+index=<your_tunnel_index> sourcetype=<your_tunnel_sourcetype> tunnel_protocol=GRE
+| stats count by src_ip, dest_ip
+| sort -count
 ```
 
-### 4. Detect Anomalies
-- Look for unusual patterns in email traffic:
+**15. New tunnel endpoints not previously observed**
 ```
-index=<your_smtp_index> sourcetype=<your_smtp_sourcetype>
-| timechart span=1h count by _time
-```
-
-- Investigate emails with unusual attachment types or sizes:
-```
-index=<your_smtp_index> sourcetype=<your_smtp_sourcetype>
-| search attachment_type="unusual_type" OR attachment_size > 1000000
+index=<your_tunnel_index> sourcetype=<your_tunnel_sourcetype> tunnel_protocol=GRE
+| stats earliest(_time) as first_seen by src_ip, dest_ip
+| where first_seen > relative_time(now(), "-7d")
 ```
 
-### 5. Monitor User Behavior
-- Monitor user behavior related to email communication:
+## Cross-Source Correlation
+
+[#cross-source-correlation](#cross-source-correlation)
+
+**16. Correlate SSH brute force with subsequent DNS/tunnel activity from the same host (possible post-compromise C2)**
 ```
-index=<your_smtp_index> sourcetype=<your_smtp_sourcetype>
-| stats count by user
-```
-- Identify users with multiple failed login attempts or unauthorized access attempts to email accounts:
-```
-index=<your_smtp_index> sourcetype=<your_smtp_sourcetype>
-| search action="login" status="failed"
-| stats count by user
-```
-- Analyze email activity patterns and deviations from normal behavior:
-```
-index=<your_smtp_index> sourcetype=<your_smtp_sourcetype>
-| timechart span=1d count by user
-```
-
-
-
-## Conclusion
-Analyzing SMTP log files with Splunk SIEM enhances network security by monitoring email traffic, detecting anomalies, and correlating data for threat detection. By leveraging Splunk's capabilities, organizations can proactively identify and respond to email-based threats, ensuring the integrity and confidentiality of their communications.
-
-Feel free to customize these steps according to your specific use case and requirements. 
-
-
-Feel free to customize these steps according to your specific use case and requirements. 
-
-Happy analyzing!
-# Analyzing SSH Log Files Using Splunk SIEM
-
-## Introduction
-SSH (Secure Shell) log files contain valuable information about remote access to servers, including login attempts, commands executed, and session details. Analyzing SSH logs using Splunk SIEM enables security professionals to monitor access to critical systems, detect anomalies, and identify potential security threats.
-
-## Project Overview
-In this project, we will upload sample SSH log files to Splunk SIEM and perform various analyses to gain insights into SSH activity within the network.
-
-## Prerequisites
-Before starting the project, ensure the following:
-- Splunk instance is installed and configured.
-- SSH log data sources are configured to forward logs to Splunk.
-
-## Steps to Upload Sample SSH Log Files to Splunk SIEM
-
-### 1. Prepare Sample SSH Log Files
-- Obtain sample [SSH log files](https://www.secrepo.com/maccdc2012/ssh.log.gz) in a suitable format (e.g., text files).
-- Ensure the log files contain relevant SSH events, including timestamps, source IP addresses, usernames, actions (login, logout), etc.
-- Save the sample log files in a directory accessible by the Splunk instance.
-
-### 2. Upload Log Files to Splunk
-- Log in to the Splunk web interface.
-- Navigate to **Settings** > **Add Data**.
-- Select **Upload** as the data input method.
-
-### 3. Choose File
-- Click on **Select File** and choose the sample SSH log file you prepared earlier.
-
-### 4. Set Source Type
-- In the **Set Source Type** section, specify the source type for the uploaded log file.
-- Choose the appropriate source type for SSH logs (e.g., `syslog` or a custom source type if applicable).
-
-### 5. Review Settings
-- Review other settings such as index, host, and sourcetype.
-- Ensure the settings are configured correctly to match the sample SSH log file.
-
-### 6. Click Upload
-- Once all settings are configured, click on the **Review** button.
-- Review the settings one final time to ensure accuracy.
-- Click **Submit** to upload the sample SSH log file to Splunk.
-
-### 7. Verify Upload
-- After uploading, navigate to the search bar in the Splunk interface.
-- Run a search query to verify that the uploaded SSH events are visible.
-
-
-## Steps to Analyze SSH Log Files in Splunk SIEM
-
-
-### 1. Search for SSH Events
-- Open Splunk interface and navigate to the search bar.
-- Enter the following search query to retrieve SSH events:
-```
-index=<your_ssh_index> sourcetype=<your_ssh_sourcetype>
-```
-
-### 2. Extract Relevant Fields
-- Identify key fields in SSH logs such as timestamps, source IP addresses, usernames, actions, etc.
-- Use Splunk's field extraction capabilities or regular expressions to extract these fields for better analysis.
-- Example extraction command:
-```
-| rex field=_raw "<regex_pattern>"
-
-```
-
-### 3. Analyze SSH Activity Patterns
-- Determine the distribution of SSH commands executed:
-```
-index=<your_ssh_index> sourcetype=<your_ssh_sourcetype>
-| stats count by command
-```
-- Identify top users or source IP addresses accessing the SSH server:
-```
-index=<your_ssh_index> sourcetype=<your_ssh_sourcetype>
-| top limit=10 user src_ip
-```
-- Analyze successful vs. failed SSH login attempts:
-```
-index=<your_ssh_index> sourcetype=<your_ssh_sourcetype>
-| stats count by action
-```
-
-### 4. Detect Anomalies
-- Look for unusual patterns in SSH activity (e.g., sudden spikes in login attempts):
-```
-index=<your_ssh_index> sourcetype=<your_ssh_sourcetype>
-| timechart span=1h count by _time
-```
-- Analyze failed login attempts:
-```
-index=<your_ssh_index> sourcetype=<your_ssh_sourcetype>
-| search action="failed"
-
-```
-- Investigate SSH sessions from unusual or suspicious source IP addresses:
-```
-index=<your_ssh_index> sourcetype=<your_ssh_sourcetype>
-| search src_ip="suspicious_ip"
-```
-
-
-### 5. Monitor User Behavior
-- Identify users with multiple failed login attempts:
-```
-index=<your_ssh_index> sourcetype=<your_ssh_sourcetype>
-| search action="failed"
-| stats count by user
-```
-- Analyze user session durations:
-```
-index=<your_ssh_index> sourcetype=<your_ssh_sourcetype>
-| stats range(_time) as session_duration by session_id
-| stats avg(session_duration) as avg_session_duration by user
+| multisearch
+  [ search index=<your_ssh_index> sourcetype=<your_ssh_sourcetype> action="failed"
+    | stats count as failed_logins by src_ip ]
+  [ search index=* sourcetype=dns_sample
+    | stats count as dns_queries by src_ip as src_ip ]
+| stats values(failed_logins) as failed_logins, values(dns_queries) as dns_queries by src_ip
+| where failed_logins > 10 AND dns_queries > 500
 ```
 
 ## Conclusion
-Analyzing SSH log files using Splunk SIEM provides valuable insights into remote access to servers within a network. By monitoring SSH events, detecting anomalies, and correlating with other logs, organizations can enhance their security posture and protect against unauthorized access and potential security threats.
 
-Feel free to customize these steps according to your specific use case and requirements. 
+[#conclusion](#conclusion)
 
-Happy analyzing!
-
-
-
-
-
-
+Mapping each log source to specific MITRE ATT&CK techniques turns isolated SPL searches into a coherent detection strategy: SSH and SMTP queries target Credential Access (T1110 family), DNS and Tunnel queries target Command and Control (T1071/T1572), and DHCP queries support Reconnaissance and AiTM detection. Together with the original per-log SPL queries, this brings the project to 15+ purpose-built detection searches across brute-force, anomaly, and C2 use cases.
